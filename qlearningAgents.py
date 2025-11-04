@@ -49,6 +49,15 @@ class QLearningAgent(ReinforcementAgent):
         self.qvalues = util.Counter()
         print("[INIT] Q-Learning Agent initialized.")
 
+        ### 🔹 Add training record tracking
+        self.episode_rewards = []          # store total reward per episode
+        self.q_updates = 0                 # count number of Q-value changes in this episode
+        self.log_file = "training_log.txt" # log file name
+
+        # Create / reset the log file
+        with open(self.log_file, "w") as f:
+            f.write("Episode,TotalReward,UpdatedQValues\n")
+
     ##################################################
     # Return current Q-value for (state, action)
     ##################################################
@@ -57,9 +66,12 @@ class QLearningAgent(ReinforcementAgent):
         Returns Q(state, action)
         If (state, action) has never been seen before, returns 0.0
         """
-        value = self.qvalues[(state, action)]
-        print(f"[GET_Q] State={state}, Action={action}, Q={value:.4f}")
+        key = (state.getPacmanPosition(), action)
+          # 🔑 use hash(state) instead of raw object
+        value = self.qvalues[key]
+        print(f"[GET_Q] StateHash={hash(state)}, Action={action}, Q={value:.4f}")
         return value
+
 
     ##################################################
     # Compute the best Q-value for a given state
@@ -93,7 +105,6 @@ class QLearningAgent(ReinforcementAgent):
         else:
             print(f"[DEBUG] Legal actions in state: {legalActions}")
 
-
         # Compute all actions with max Q-value (to break ties randomly)
         maxQ = self.computeValueFromQValues(state)
         bestActions = [a for a in legalActions if self.getQValue(state, a) == maxQ]
@@ -126,7 +137,7 @@ class QLearningAgent(ReinforcementAgent):
         return action
 
     ##################################################
-    # Q-learning update rule
+    # Q-learning update rule (stable version)
     ##################################################
     def update(self, state, action, nextState, reward: float):
         """
@@ -134,15 +145,28 @@ class QLearningAgent(ReinforcementAgent):
         
         Q(s,a) ← (1 - α) * Q(s,a) + α * [r + γ * max_a' Q(s', a')]
         """
-        oldQ = self.getQValue(state, action)
-        nextValue = self.computeValueFromQValues(nextState)
-        sample = reward + self.discount * nextValue
+        # Use stable key representation (position + food layout)
+        key = (state.getPacmanPosition(), tuple(state.getFood().asList()), action)
+        nextKeyActions = self.getLegalActions(nextState)
 
-        # Update rule
-        newQ = (1 - self.alpha) * oldQ + self.alpha * sample
-        self.qvalues[(state, action)] = newQ
+        # Retrieve old Q
+        oldQ = self.qvalues[key]
 
-        print(f"[UPDATE] State={state}, Action={action}, Reward={reward}, NextValue={nextValue:.4f}")
+        # Compute target
+        nextValue = 0.0
+        if nextKeyActions:
+            nextValue = max([self.getQValue(nextState, a) for a in nextKeyActions])
+        target = reward + self.discount * nextValue
+
+        # Q-learning update
+        newQ = (1 - self.alpha) * oldQ + self.alpha * target
+        self.qvalues[key] = newQ
+
+        # Count updates only when value changes
+        if abs(newQ - oldQ) > 1e-6:
+            self.q_updates += 1
+
+        print(f"[UPDATE] StatePos={state.getPacmanPosition()}, Action={action}, Reward={reward:.2f}, NextValue={nextValue:.4f}")
         print(f"         OldQ={oldQ:.4f}, NewQ={newQ:.4f}")
 
     ##################################################
@@ -153,6 +177,41 @@ class QLearningAgent(ReinforcementAgent):
 
     def getValue(self, state):
         return self.computeValueFromQValues(state)
+
+    ##################################################
+    # 🔹 Logging at the end of each episode
+    ##################################################
+    def final(self, state):
+        """
+        Called by the environment at the end of each episode.
+        Logs total reward and how many Q-values changed.
+        """
+        try:
+            ReinforcementAgent.final(self, state)
+        except Exception:
+            pass
+
+        total_reward = 0
+        if hasattr(self, "episodeRewards") and isinstance(self.episodeRewards, (list, tuple)) and len(self.episodeRewards) > 0:
+            total_reward = self.episodeRewards[-1]
+        elif hasattr(self, "episodeRewards"):
+            total_reward = float(self.episodeRewards)
+        elif hasattr(self, "episode_rewards") and len(self.episode_rewards) > 0:
+            total_reward = self.episode_rewards[-1]
+
+        if not hasattr(self, "episode_rewards"):
+            self.episode_rewards = []
+        self.episode_rewards.append(total_reward)
+
+        try:
+            with open(self.log_file, "a") as f:
+                f.write(f"{getattr(self, 'episodesSoFar', 0)},{total_reward:.2f},{self.q_updates}\n")
+        except Exception as e:
+            print(f"[LOGGING ERROR] {e}")
+
+        print(f"[EPISODE END] #{getattr(self, 'episodesSoFar', 0)}  TotalReward={total_reward:.2f}, QUpdates={self.q_updates}")
+        self.q_updates = 0
+
 
 
 ##########################################################
@@ -180,6 +239,12 @@ class PacmanQAgent(QLearningAgent):
         self.doAction(state, action)
         return action
 
+    def final(self, state):
+        """
+        Ensure PacmanQAgent also logs and ends episode properly.
+        """
+        QLearningAgent.final(self, state)
+
 
 ##########################################################
 # CLASS: ApproximateQAgent
@@ -206,26 +271,33 @@ class ApproximateQAgent(PacmanQAgent):
         Q(s,a) = Σ (w_i * f_i(s,a))
         """
         features = self.featExtractor.getFeatures(state, action)
-        q_value = self.weights * features  # util.Counter supports dot product
-        print(f"[APPROX_Q] State={state}, Action={action}, Q={q_value:.4f}")
+        q_value = 0.0
+        for feature, value in features.items():
+            q_value += self.weights[feature] * value
+        print(f"[GET_Q] Pos={state.getPacmanPosition()}, Action={action}, Q={q_value:.4f}")
         return q_value
 
     def update(self, state, action, nextState, reward: float):
         """
-        Update weights using the gradient descent rule:
-        difference = [r + γ * max_a' Q(s',a')] - Q(s,a)
-        w_i ← w_i + α * difference * f_i(s,a)
+        Performs the approximate Q-learning weight update for a state transition:
+        difference = (r + γ * max_a' Q(s', a')) - Q(s, a)
+        w_i ← w_i + α * difference * f_i(s, a)
         """
+        # Extract features and current Q-value
         features = self.featExtractor.getFeatures(state, action)
-        q_value = self.getQValue(state, action)
+        currentQ = self.getQValue(state, action)
+
+        # Compute target and difference
         nextValue = self.computeValueFromQValues(nextState)
-        difference = (reward + self.discount * nextValue) - q_value
+        sample = reward + self.discount * nextValue
+        difference = sample - currentQ
 
-        for f in features:
-            self.weights[f] += self.alpha * difference * features[f]
+        # Update each weight
+        for feature, value in features.items():
+            self.weights[feature] += self.alpha * difference * value
 
-        print(f"[APPROX_UPDATE] State={state}, Action={action}, Reward={reward}")
-        print(f"                Difference={difference:.4f}, Weights={dict(self.weights)}")
+        print(f"[APPROX_UPDATE] State={state}, Action={action}, Reward={reward}, NextValue={nextValue:.4f}")
+        print(f"                CurrentQ={currentQ:.4f}, Difference={difference:.4f}, Weights={dict(self.weights)}")
 
     def final(self, state):
         PacmanQAgent.final(self, state)
