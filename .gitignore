@@ -1,0 +1,4 @@
+echo "training_summary.txt" >> .gitignore
+echo "smallClassic_log.txt" >> .gitignore
+echo "training_small.txt" >> .gitignore
+echo "training_log.txt" >> .gitignore
