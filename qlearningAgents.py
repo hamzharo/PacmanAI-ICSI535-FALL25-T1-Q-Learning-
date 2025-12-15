@@ -542,3 +542,13 @@ class ApproximateQAgent(PacmanQAgent):
         PacmanQAgent.final(self, state)
         if self.episodesSoFar == self.numTraining:
             print("[TRAINING COMPLETE] Final Weights:", dict(self.weights))
+
+
+class HybridAStarQAgent(ApproximateQAgent):
+    """
+    Hybrid A* + Approximate Q-Learning agent.
+    Uses SimpleExtractor + A* consistency feature.
+    """
+    def __init__(self, **args):
+        super().__init__(**args)
+        self.explorationFunction = None  # if needed
